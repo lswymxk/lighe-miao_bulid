@@ -228,7 +228,7 @@ jobs:
       # 编译
       # ---------------------------------------------------------------------
       - name: 缓存已下载的源码包 (Cache downloaded sources)
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ponwrt/dl
           key: ponwrt-dl-${{ steps.device.outputs.soc }}-${{ hashFiles('ponwrt/feeds.conf.default') }}
