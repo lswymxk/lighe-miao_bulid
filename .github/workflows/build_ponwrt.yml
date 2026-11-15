@@ -1,0 +1,329 @@
+# =============================================================================
+# PonWrt 云编译工作流（手动触发 + 单设备）
+#
+# 参考：lswymxk/build-openwrt-with-actions 仓库 25.12 分支的
+#       .github/workflows/build_immortalwrt.yml
+#
+# 特性：
+#   1. 仅 workflow_dispatch 手动触发，不随 push / 定时任务自动编译
+#   2. 编译前释放磁盘空间：先删大件与缓存；双盘布局再合并 / 与 /mnt
+#   3. 手动选择设备型号，默认 XG-040G-MD（Nokia XG-040G-MD UBI / AN7581）
+#   4. 从 pbs05/ponwrt 拉取源码，合并官方 configs/release.config，
+#      并且只保留所选设备，一次只产出一个机型的固件
+#   5. 固件与编译日志分别上传 Artifact，Job Summary 里给出结果摘要
+# =============================================================================
+name: 🚀 编译 PonWrt (Build PonWrt)
+
+run-name: 编译 PonWrt ${{ inputs.device }} (#${{ github.run_number }})
+
+on:
+  # 只允许在 Actions 页面手动运行
+  workflow_dispatch:
+    inputs:
+      device:
+        description: "设备型号（默认 XG-040G-MD）"
+        type: choice
+        required: true
+        default: "XG-040G-MD"
+        options:
+          - "XG-040G-MD"
+          - "XG-040G-TF"
+          - "HG5382A"
+          - "HG5585F-CT"
+          - "HG5585F-CU"
+          - "XG2010G"
+          - "UNG00A"
+          - "ZN504XG-D"
+          - "ZN515XG-D"
+          - "HM2004-DU"
+          - "XG-040G-MF"
+          - "XG-040G-MF-UBI"
+      branch:
+        description: "PonWrt 源码分支或标签（默认 master）"
+        type: string
+        required: true
+        default: "master"
+      multithreading:
+        description: "开启多线程编译 (make -j$(nproc))"
+        type: boolean
+        default: true
+      ssh:
+        description: "启用 SSH 调试（upterm，限时 15 分钟，失败不阻断编译）"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ponwrt-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: 🚀 编译 PonWrt (${{ inputs.device }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      # ---------------------------------------------------------------------
+      # 磁盘准备：先清理，再按磁盘布局决定是否合并 / 与 /mnt
+      # ---------------------------------------------------------------------
+      - name: 查看清理前磁盘 (Before freeing up disk space)
+        run: |
+          echo "=== 清理前 ==="
+          df -hT
+
+      - name: 清理无用软件与缓存，释放磁盘空间 (Clean up disk space)
+        run: |
+          echo "=== 清理前 ==="
+          df -hT / | tail -1
+
+          # ① 删除 runner 镜像里体积大、本项目用不到的东西（约 25~30GB）
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /opt/az \
+            /usr/share/swift || true
+
+          # ② Docker 镜像缓存
+          sudo docker image prune --all --force 2>/dev/null || true
+
+          # ③ APT 缓存与包列表
+          sudo apt-get clean || true
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/* || true
+
+          echo "=== 清理后 ==="
+          df -hT / | tail -1
+
+      # ubuntu-latest 会随机分配单盘/双盘：
+      #   单盘时 /mnt 与 / 是同一个设备，跳过 maximize-build-space；
+      #   双盘时再用它合并，避免单盘下第二次 fallocate 把根分区压到只剩几十 MB。
+      - name: 检测磁盘布局 (Detect disk layout)
+        id: disk
+        run: |
+          df -hT / || true
+          df -hT /mnt 2>/dev/null || true
+
+          ROOT_DEV="$(df -P / | awk 'NR==2{print $1}')"
+          MNT_DEV="$(df -P /mnt 2>/dev/null | awk 'NR==2{print $1}')"
+          if [ -z "$MNT_DEV" ] || [ "$MNT_DEV" = "$ROOT_DEV" ]; then
+            echo "layout=single" >> "$GITHUB_OUTPUT"
+            echo "::notice::单盘布局，跳过 maximize-build-space，直接使用根盘"
+          else
+            echo "layout=dual" >> "$GITHUB_OUTPUT"
+            echo "::notice::双盘布局，合并 / 与 /mnt 以扩大构建空间"
+          fi
+
+      - name: 合并磁盘（仅双盘）(Merge disks for dual-disk layout)
+        if: steps.disk.outputs.layout == 'dual'
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          temp-reserve-mb: 4096
+          swap-size-mb: 2048
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
+
+      - name: 查看清理后磁盘 (Free up disk space complete)
+        run: |
+          echo "=== 清理后 ==="
+          df -hT
+
+      # ---------------------------------------------------------------------
+      # 编译依赖
+      # ---------------------------------------------------------------------
+      - name: 安装编译依赖 (Install build dependencies)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+            g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+            libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
+            libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
+            ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
+            python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+            upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/* /var/cache/apt/*
+
+      # ---------------------------------------------------------------------
+      # 拉取源码
+      # ---------------------------------------------------------------------
+      - name: 检出当前仓库（脚本与 diy.sh）(Checkout this repo)
+        uses: actions/checkout@v5
+
+      - name: 克隆 PonWrt 源码 (Clone PonWrt repo)
+        uses: actions/checkout@v5
+        with:
+          repository: pbs05/ponwrt
+          ref: ${{ inputs.branch }}
+          path: ponwrt
+          fetch-depth: 1
+
+      - name: 更新并安装 feeds (Update and install feeds)
+        working-directory: ponwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # ---------------------------------------------------------------------
+      # 生成 .config：只保留所选设备
+      # ---------------------------------------------------------------------
+      - name: 选择设备并生成 .config (Select device and generate .config)
+        id: device
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/select-device.sh" \
+            "${{ inputs.device }}" \
+            "$GITHUB_WORKSPACE/ponwrt"
+
+      # 可选自定义：在 feeds 之后、make defconfig 之前执行。
+      # 例如在 diy.sh 里追加 CONFIG_PACKAGE_xxx=y，defconfig 会补齐依赖。
+      - name: 运行 diy.sh（可选自定义）(Run diy.sh)
+        working-directory: ponwrt
+        run: |
+          if [ -f "$GITHUB_WORKSPACE/diy.sh" ]; then
+            cp -f "$GITHUB_WORKSPACE/diy.sh" ./diy.sh
+            chmod +x ./diy.sh
+            ./diy.sh
+          else
+            echo "未找到 diy.sh，跳过"
+          fi
+
+      # ---------------------------------------------------------------------
+      # 可选：SSH 调试（需要先在 GitHub 账号里添加 SSH 公钥）
+      # 如果网络封锁 22 端口，可把 upterm-server 改成 wss://uptermd.upterm.dev（443）
+      # ---------------------------------------------------------------------
+      - name: SSH 连接编译环境，限时 15 分钟 (Connect with SSH)
+        if: ${{ inputs.ssh == true }}
+        uses: owenthereal/action-upterm@v2
+        continue-on-error: true
+        timeout-minutes: 20
+        with:
+          limit-access-to-actor: true
+          wait-timeout-minutes: 15
+          # upterm-server: wss://uptermd.upterm.dev
+
+      - name: 同步配置并补齐依赖 (make defconfig)
+        working-directory: ponwrt
+        run: make defconfig
+
+      - name: 校验 .config 中只启用了所选设备 (Verify selected device)
+        run: |
+          bash "$GITHUB_WORKSPACE/scripts/verify-config.sh" \
+            "${{ steps.device.outputs.soc }}" \
+            "${{ steps.device.outputs.profile }}" \
+            "$GITHUB_WORKSPACE/ponwrt/.config"
+
+      # ---------------------------------------------------------------------
+      # 编译
+      # ---------------------------------------------------------------------
+      - name: 缓存已下载的源码包 (Cache downloaded sources)
+        uses: actions/cache@v4
+        with:
+          path: ponwrt/dl
+          key: ponwrt-dl-${{ steps.device.outputs.soc }}-${{ hashFiles('ponwrt/feeds.conf.default') }}
+          restore-keys: |
+            ponwrt-dl-${{ steps.device.outputs.soc }}-
+
+      - name: 预下载源码包 (Download sources)
+        working-directory: ponwrt
+        run: |
+          # 新版 runner 的 /tmp 可能是 tmpfs，把临时目录放到 runner 主磁盘
+          export TMPDIR="$RUNNER_TEMP"
+          make download -j"$(nproc)" || make download -j1 V=s
+
+      - name: 编译 PonWrt (Build PonWrt)
+        working-directory: ponwrt
+        run: |
+          set -euo pipefail
+          export TMPDIR="$RUNNER_TEMP"
+          if [ "${{ inputs.multithreading }}" = "true" ]; then
+            make -j"$(nproc)" 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          else
+            make -j1 2>&1 | tee "$GITHUB_WORKSPACE/build.log"
+          fi
+
+      - name: 检查固件产物 (Check build output)
+        run: |
+          set -euo pipefail
+          SOC="${{ steps.device.outputs.soc }}"
+          OUT="ponwrt/bin/targets/airoha/${SOC}"
+          echo "输出目录: $OUT"
+          ls -lh "$OUT"
+          echo "--- 固件文件 ---"
+          find "$OUT" -maxdepth 1 -type f \
+            \( -name '*.itb' -o -name '*.bin' -o -name '*.tar' -o -name '*.ubi' -o -name '*.img' \) \
+            -printf '%f\n' | sort
+          if [ -z "$(find "$OUT" -maxdepth 1 -type f \
+            \( -name '*.itb' -o -name '*.bin' -o -name '*.tar' -o -name '*.ubi' -o -name '*.img' \) \
+            -print -quit)" ]; then
+            echo "::error::未找到固件文件，编译可能未真正完成"
+            exit 1
+          fi
+          echo "--- SHA256 ---"
+          find "$OUT" -maxdepth 1 -type f -name '*.sha256' -exec cat {} \;
+
+      - name: 上传固件到 Artifact (Upload firmware artifact)
+        uses: actions/upload-artifact@v6
+        with:
+          name: PonWrt-${{ steps.device.outputs.profile }}-${{ github.run_number }}
+          path: |
+            ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/*.itb
+            ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/*.bin
+            ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/*.tar
+            ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/*.ubi
+            ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/*.img
+            ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/*.sha256
+            ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/profiles.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传编译日志与配置 (Upload build logs)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: PonWrt-logs-${{ github.run_number }}
+          path: |
+            build.log
+            ponwrt/.config
+            ponwrt/feeds.conf.default
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: 写入运行摘要 (Job summary)
+        if: always()
+        run: |
+          SOC="${{ steps.device.outputs.soc }}"
+          PROFILE="${{ steps.device.outputs.profile }}"
+          {
+            echo "## PonWrt 编译结果"
+            echo ""
+            echo "| 项目 | 值 |"
+            echo "| --- | --- |"
+            echo "| 设备型号 | \`${{ inputs.device }}\` |"
+            echo "| 平台 | \`airoha/${SOC:-unknown}\` |"
+            echo "| Profile | \`${PROFILE:-unknown}\` |"
+            echo "| 源码 | [pbs05/ponwrt@${{ inputs.branch }}](https://github.com/pbs05/ponwrt/tree/${{ inputs.branch }}) |"
+            echo "| 提交 | \`$(git -C ponwrt rev-parse --short HEAD 2>/dev/null || echo unknown)\` |"
+            echo "| 运行 | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+            echo ""
+            echo "### 固件文件"
+            if [ -d "ponwrt/bin/targets/airoha/${SOC}" ]; then
+              find "ponwrt/bin/targets/airoha/${SOC}" -maxdepth 1 -type f \
+                \( -name '*.itb' -o -name '*.bin' -o -name '*.tar' -o -name '*.ubi' -o -name '*.img' \) \
+                -printf '- `%f` (%s bytes)\n' | sort || true
+            else
+              echo "未找到输出目录（编译可能失败，请查看 Artifact 中的 build.log）"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

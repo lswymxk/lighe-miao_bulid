@@ -1,0 +1,10 @@
+# 本地编译产物
+build.log
+*.log
+*.tmp
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
