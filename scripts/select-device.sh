@@ -87,6 +87,12 @@ sed -i -E \
   -e '/^#? ?CONFIG_TARGET_airoha_(an7581|an7583)_DEVICE_/d' \
   "$CONFIG_FILE"
 
+# PonWrt 的 an7581/an7583.config 是为“一次编多个设备”生成的，
+# 里面带有所有设备的 CONFIG_MODULE_DEFAULT_* 默认包。
+# 删掉它们，让 make defconfig 按所选设备的 select 重新生成，
+# 避免把其他机型的 WiFi/PHY 固件等无关包带进固件。
+sed -i -E '/^#? ?CONFIG_MODULE_DEFAULT_/d' "$CONFIG_FILE"
+
 # 确保多设备模式打开（configs/*.config 默认就是 y）
 sed -i -E '/^#? ?CONFIG_TARGET_MULTI_PROFILE(=| is not set)/d' "$CONFIG_FILE"
 echo 'CONFIG_TARGET_MULTI_PROFILE=y' >> "$CONFIG_FILE"
