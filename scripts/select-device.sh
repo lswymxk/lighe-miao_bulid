@@ -58,7 +58,7 @@ CONFIG_FILE="$PONWRT_DIR/.config"
 [ -f "$IMAGE_MK" ]   || { echo "错误：缺少 image Makefile $IMAGE_MK" >&2; exit 1; }
 
 # profile 必须真的存在于对应 SoC 的 image Makefile 里，防止映射写错
-if ! grep -qE "^TARGET_DEVICES \+= ${PROFILE}$" "$IMAGE_MK"; then
+if ! grep -qxF "TARGET_DEVICES += ${PROFILE}" "$IMAGE_MK"; then
   echo "错误：$IMAGE_MK 中找不到设备 profile: $PROFILE" >&2
   exit 1
 fi

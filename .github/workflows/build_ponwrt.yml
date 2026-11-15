@@ -145,7 +145,7 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends \
-            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            ack antlr3 asciidoc autoconf automake autopoint bc binutils bison build-essential \
             bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
             g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
             libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
@@ -276,7 +276,7 @@ jobs:
       - name: 上传固件到 Artifact (Upload firmware artifact)
         uses: actions/upload-artifact@v6
         with:
-          name: PonWrt-${{ steps.device.outputs.profile }}-${{ github.run_number }}
+          name: PonWrt-${{ steps.device.outputs.profile }}-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/*.itb
             ponwrt/bin/targets/airoha/${{ steps.device.outputs.soc }}/*.bin
@@ -292,7 +292,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: PonWrt-logs-${{ github.run_number }}
+          name: PonWrt-logs-${{ github.run_number }}-${{ github.run_attempt }}
           path: |
             build.log
             ponwrt/.config
