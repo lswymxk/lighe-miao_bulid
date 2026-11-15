@@ -70,10 +70,11 @@
    **Run workflow**。
 4. `设备型号` 保持默认 `XG-040G-MD`，或选择其他机型；需要调试可勾选
    `启用 SSH 调试`，然后点击 **Run workflow**。
+   （SSH 调试需要先在 GitHub 账号里添加 SSH 公钥；upterm 启动失败不会阻断编译。）
 5. 编译完成后，在本次运行页面底部下载：
-   - `PonWrt-<profile>-<run_number>`：固件（`.itb` / `.bin` / `.tar` /
+   - `PonWrt-<profile>-<run_number>-<run_attempt>`：固件（`.itb` / `.bin` / `.tar` /
      `.sha256` / `profiles.json`）；
-   - `PonWrt-logs-<run_number>`：`build.log`、最终 `.config`、
+   - `PonWrt-logs-<run_number>-<run_attempt>`：`build.log`、最终 `.config`、
      `feeds.conf.default`。
 
 ## 工作流做了什么
